@@ -1,0 +1,56 @@
+name: Sync with upstream
+
+# Weekly: if LedgerHQ/app-openpgp master has new commits, merge them into a
+# branch and open a pull request against ble-support. The Bluetooth build
+# workflow then re-verifies the diff and rebuilds.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ble-support
+          fetch-depth: 0
+      - name: Merge upstream into a sync branch
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/LedgerHQ/app-openpgp.git
+          git fetch --quiet upstream master
+          if git merge-base --is-ancestor upstream/master HEAD; then
+            echo "Already up to date."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          sha=$(git rev-parse --short upstream/master)
+          branch="sync/upstream-$sha"
+          git checkout -b "$branch"
+          if ! git merge --no-edit upstream/master; then
+            echo "::error::Merge conflict — resolve manually"
+            exit 1
+          fi
+          git push -f origin "$branch"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Open pull request
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr create --repo "$GITHUB_REPOSITORY" --base ble-support \
+            --head "${{ steps.merge.outputs.branch }}" \
+            --title "Sync with upstream ${{ steps.merge.outputs.sha }}" \
+            --body "Merges LedgerHQ/app-openpgp master (${{ steps.merge.outputs.sha }}). Review upstream changes; the Bluetooth build re-checks that only ENABLE_BLUETOOTH differs." \
+            || echo "PR already exists"

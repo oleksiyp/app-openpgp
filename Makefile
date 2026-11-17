@@ -101,7 +101,7 @@ endif
 ########################################
 # Application communication interfaces #
 ########################################
-#ENABLE_BLUETOOTH = 1
+ENABLE_BLUETOOTH = 1
 #ENABLE_NFC = 1
 
 ########################################

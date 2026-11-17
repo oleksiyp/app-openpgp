@@ -1,0 +1,98 @@
+name: Bluetooth build (Flex, Stax)
+
+# Builds the OpenPGP app with ENABLE_BLUETOOTH=1 for Bluetooth-capable devices,
+# verifies that the only source change vs. upstream is that one Makefile line,
+# and publishes binaries + SHA-256 checksums (as a GitHub release on tags).
+
+on:
+  push:
+    branches: [ble-support]
+    tags: ["v*-ble*"]
+  pull_request:
+    branches: [ble-support]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-diff:
+    name: Only ENABLE_BLUETOOTH differs from upstream
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Compare with LedgerHQ/app-openpgp
+        run: |
+          git remote add upstream https://github.com/LedgerHQ/app-openpgp.git
+          git fetch --quiet upstream master
+          base=$(git merge-base HEAD upstream/master)
+          # Ignore CI files of this fork; everything else must match upstream except one line.
+          diff=$(git diff "$base" HEAD -- . ':(exclude).github' ':(exclude)BLUETOOTH.md' | grep -E '^[+-][^+-]' || true)
+          echo "$diff"
+          expected=$'-#ENABLE_BLUETOOTH = 1\n+ENABLE_BLUETOOTH = 1'
+          if [ "$diff" != "$expected" ]; then
+            echo "::error::Source differs from upstream beyond the ENABLE_BLUETOOTH line"
+            exit 1
+          fi
+
+  build:
+    name: build (${{ matrix.device }})
+    needs: verify-diff
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ledgerhq/ledger-app-builder/ledger-app-builder-lite:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { device: flex, sdk: FLEX_SDK, target_id: "0x33300004" }
+          - { device: stax, sdk: STAX_SDK, target_id: "0x33200004" }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          make BOLOS_SDK="${${{ matrix.sdk }}}" -j"$(nproc)"
+      - name: Check Bluetooth is linked in
+        run: grep -q ble_aci_gatt debug/app.map
+      - name: Package
+        run: |
+          out=openpgp-ble-${{ matrix.device }}
+          mkdir "$out"
+          cp bin/app.elf bin/app.apdu bin/app.sha256 "$out"/
+          cat > "$out"/INSTALL.txt <<EOF
+          Device: ${{ matrix.device }}   targetId: ${{ matrix.target_id }}
+          Commit: ${GITHUB_SHA}
+          App hash (must match 'ledgerblue.listApps' after install): $(cat bin/app.sha256)
+
+          python3 -m venv .venv && .venv/bin/pip install ledgerblue
+          .venv/bin/python -m ledgerblue.runScript --scp --targetId ${{ matrix.target_id }} \\
+            --fileName app.apdu --elfFile app.elf
+          EOF
+          tar czf "$out.tar.gz" "$out"
+          sha256sum "$out.tar.gz" > "$out.tar.gz.sha256"
+          echo "### ${{ matrix.device }}: app hash \`$(cat bin/app.sha256)\`" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openpgp-ble-${{ matrix.device }}
+          path: openpgp-ble-${{ matrix.device }}.tar.gz*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "OpenPGP (Bluetooth build) $GITHUB_REF_NAME" \
+            --notes "Upstream OpenPGP app with only \`ENABLE_BLUETOOTH = 1\` enabled. Unofficial, unsigned by Ledger — verify hashes before sideloading." \
+            openpgp-ble-*.tar.gz*
